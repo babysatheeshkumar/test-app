@@ -17,48 +17,35 @@ A Retrieval-Augmented Generation (RAG) proof of concept: upload PDF/TXT document
 
 ## Architecture
 
-Two independent flows share the same Postgres table: **ingestion** (upload → chunk → embed → store) and **ask** (embed question → similarity search → filter → prompt → Claude).
+**ingestion** (upload → chunk → embed → store) and **ask** (embed question → similarity search → filter → prompt → Claude).
 
 ```mermaid
 flowchart TD
-    subgraph Ingestion["Ingestion — POST /api/upload"]
-        A[PDF / TXT file] --> B[Extract text<br/>PDFBox]
+    subgraph Ingestion["Ingestion"]
+        A[PDF / TXT file] --> B[Extract text using PDFBox]
         B --> C[Chunk text<br/>1000 chars, 200 overlap]
         C --> D[Embed each chunk<br/>Ollama nomic-embed-text]
-        D --> E[(Postgres + pgvector<br/>document_chunks_claude_llm)]
+        D --> E[(Postgres + pgvector)]
     end
 
-    subgraph Ask["Ask — GET /api/ask?q=..."]
-        F[User question] --> G[Embed question<br/>Ollama nomic-embed-text]
-        G --> H["Top-3 nearest chunks<br/>cosine distance ORDER BY embedding <=> ?"]
+    subgraph Ask["Ask"]
+        F[User question] --> G[Embed question using Ollama nomic-embed-text]
+        G --> H["Top-K nearest chunks"]
         E -.-> H
-        H --> I{Similarity ≥\napp.similarity-threshold?}
+        H --> I{Similarity ≥ threshold}
         I -- no rows pass --> N["'No relevant content found'"]
-        I -- at least 1 passes --> J[Build grounded prompt<br/>context + question]
-        J --> K{Token estimate ≤\napp.input-token-limit?}
+        I -- at least 1 passes --> J[Build prompt : context + question]
+        J --> K{Token estimate ≤\n tokenLimit }
         K -- too large --> L[400 PROMPT_TOO_LONG]
         K -- ok --> M[Claude ChatClient]
         M --> O[Answer + top source chunk]
     end
 ```
 
-### Components
 
-| Class | Responsibility |
-|---|---|
-| [`UploadController`](src/main/java/com/poc/rag/rag_demo/controller/UploadController.java) | `POST /api/upload` — accepts a multipart PDF/TXT file |
-| [`DocumentService`](src/main/java/com/poc/rag/rag_demo/service/DocumentService.java) | Extracts text, splits into overlapping chunks, embeds and inserts each chunk via `JdbcTemplate` |
-| [`AskController`](src/main/java/com/poc/rag/rag_demo/controller/AskController.java) | `GET /api/ask?q=...` — asks a question |
-| [`RagService`](src/main/java/com/poc/rag/rag_demo/service/RagService.java) | Embeds the question, retrieves the top-3 nearest chunks, discards any below the similarity threshold, builds the grounded prompt, checks token budget, calls Claude |
-| [`EmbeddingService`](src/main/java/com/poc/rag/rag_demo/service/EmbeddingService.java) | Thin wrapper around Spring AI's `EmbeddingModel` |
-| [`AiConfig`](src/main/java/com/poc/rag/rag_demo/config/AiConfig.java) | Defines the `ChatClient` and `TokenCountEstimator` beans |
-| [`GlobalExceptionHandler`](src/main/java/com/poc/rag/rag_demo/exception/GlobalExceptionHandler.java) | Maps `PromptTooLongException` / bad file type / unhandled errors to a JSON `{code, message}` body |
+## Setup
 
-> Note: [`DocumentChunk`](src/main/java/com/poc/rag/rag_demo/entity/DocumentChunk.java) / [`ChunkRepository`](src/main/java/com/poc/rag/rag_demo/repository/ChunkRepository.java) are JPA leftovers — not wired into either flow. All reads/writes to `document_chunks_claude_llm` go through `JdbcTemplate` in `DocumentService`/`RagService`.
 
-### Relevance filtering
-
-`RagService` fetches the top-3 chunks by pgvector cosine distance (`embedding <=> ?::vector`) and drops any chunk whose cosine similarity falls below `app.similarity-threshold` (default `0.75`). If none pass, the endpoint returns `"No relevant content found"` instead of feeding the LLM weakly-related context. Tune this value in [`application.yml`](src/main/resources/application.yml) — see the property table below.
 
 ## Prerequisites
 
@@ -66,8 +53,6 @@ flowchart TD
 - Maven 3.9+
 - Docker Desktop (for Postgres/pgvector and Ollama)
 - An Anthropic API key
-
-## Setup
 
 ### 1. Clone and configure
 
